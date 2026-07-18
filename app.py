@@ -289,6 +289,7 @@ def build_tenure_usage_chart(cust, usage):
 def main():
     st.set_page_config(page_title="고객은 왜 이탈하는가", layout="wide")
     st.title("고객은 왜 이탈하는가 — 이탈 원인 진단 대시보드")
+    st.caption("제작: 이성령")
 
     cust = load_csv("data_customers.csv")
     voc = load_csv("data_voc.csv")
