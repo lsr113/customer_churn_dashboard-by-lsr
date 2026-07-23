@@ -540,16 +540,22 @@ def main():
     st.divider()
     st.subheader("상담원 관점: 직원만족도와 고객 경험")
 
-    agents_df = load_agents()
-    consult_df = load_consult_joined()
+    try:
+        agents_df = load_agents()
+        consult_df = load_consult_joined()
+    except Exception:
+        st.info(
+            "이 섹션은 BigQuery 연동이 필요합니다. 배포 환경에는 인증 정보가 설정되어 있지 않아 "
+            "표시되지 않으며, gcloud 인증이 되어 있는 로컬 환경에서만 확인할 수 있습니다."
+        )
+    else:
+        teams = sorted(agents_df["team"].unique())
+        selected_team = st.selectbox("팀 선택", ["전체"] + teams)
+        team_filter = None if selected_team == "전체" else selected_team
 
-    teams = sorted(agents_df["team"].unique())
-    selected_team = st.selectbox("팀 선택", ["전체"] + teams)
-    team_filter = None if selected_team == "전체" else selected_team
-
-    st.plotly_chart(build_enps_gauge(agents_df, team_filter), use_container_width=True)
-    st.plotly_chart(build_burnout_csat_chart(consult_df, team_filter), use_container_width=True)
-    st.plotly_chart(build_outlier_comparison_chart(consult_df, team_filter), use_container_width=True)
+        st.plotly_chart(build_enps_gauge(agents_df, team_filter), use_container_width=True)
+        st.plotly_chart(build_burnout_csat_chart(consult_df, team_filter), use_container_width=True)
+        st.plotly_chart(build_outlier_comparison_chart(consult_df, team_filter), use_container_width=True)
 
 
 if __name__ == "__main__":
