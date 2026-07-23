@@ -4,10 +4,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from google.cloud import bigquery
 from plotly.subplots import make_subplots
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
+BQ_DATASET = "7_8_practice"
 
 GRAY = "#9CA3AF"
 RED = "#DC2626"
@@ -286,6 +288,219 @@ def build_tenure_usage_chart(cust, usage):
     return fig
 
 
+@st.cache_resource
+def get_bq_client():
+    return bigquery.Client()
+
+
+@st.cache_data
+def load_agents():
+    client = get_bq_client()
+    return client.query(f"SELECT * FROM `{BQ_DATASET}.agents`").to_dataframe()
+
+
+@st.cache_data
+def load_consult_joined():
+    client = get_bq_client()
+    query = f"""
+        SELECT
+            a.agent_id,
+            a.team,
+            a.overtime_hours_avg,
+            a.training_completed_yn,
+            s.csat,
+            c.is_recontact
+        FROM `{BQ_DATASET}.agents` AS a
+        JOIN `{BQ_DATASET}.data_consultations` AS c ON a.agent_id = c.agent_id
+        JOIN `{BQ_DATASET}.data_satisfaction` AS s ON c.consult_id = s.consult_id
+    """
+    return client.query(query).to_dataframe()
+
+
+def classify_nps(score):
+    if score >= 9:
+        return "promoter"
+    if score >= 7:
+        return "passive"
+    return "detractor"
+
+
+def enps(df):
+    total = len(df)
+    if total == 0:
+        return 0.0
+    groups = df["agent_satisfaction"].apply(classify_nps)
+    promoters = (groups == "promoter").sum()
+    detractors = (groups == "detractor").sum()
+    return (promoters - detractors) / total * 100
+
+
+def build_enps_gauge(agents_df, team_filter):
+    df = agents_df if team_filter is None else agents_df[agents_df["team"] == team_filter]
+    value = enps(df)
+    title = f"{team_filter} eNPS" if team_filter else "전체 eNPS"
+    bar_color = RED if value < 0 else "#111827"
+
+    fig = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=value,
+            number={"valueformat": ".1f"},
+            title={"text": title},
+            gauge={
+                "axis": {"range": [-100, 100]},
+                "bar": {"color": bar_color},
+                "steps": [
+                    {"range": [-100, 0], "color": "#FEE2E2"},
+                    {"range": [0, 100], "color": "#E5E7EB"},
+                ],
+                "threshold": {"line": {"color": "#111827", "width": 2}, "thickness": 0.8, "value": 0},
+            },
+        )
+    )
+    fig.update_layout(height=320, margin=dict(t=60, b=20, l=40, r=40))
+    return fig
+
+
+def agent_csat_summary(df):
+    summary = (
+        df.groupby("agent_id")
+        .agg(overtime_hours_avg=("overtime_hours_avg", "first"), avg_csat=("csat", "mean"))
+        .reset_index()
+    )
+    summary["overtime_hours_avg"] = summary["overtime_hours_avg"].astype(float)
+    summary["avg_csat"] = summary["avg_csat"].astype(float)
+    return summary
+
+
+def build_burnout_csat_chart(consult_df, team_filter):
+    df = consult_df if team_filter is None else consult_df[consult_df["team"] == team_filter]
+    agent_summary = agent_csat_summary(df)
+
+    correlation = agent_summary["overtime_hours_avg"].corr(agent_summary["avg_csat"])
+
+    fig = px.scatter(
+        agent_summary,
+        x="overtime_hours_avg",
+        y="avg_csat",
+        trendline="ols",
+        custom_data=["agent_id", "overtime_hours_avg", "avg_csat"],
+        title=f"초과근무 시간과 CSAT 평균의 관계 ({team_filter if team_filter else '전체'})",
+    )
+    fig.update_traces(
+        hovertemplate=(
+            "상담원 ID: %{customdata[0]}<br>초과근무 시간: %{customdata[1]}시간<br>"
+            "CSAT 평균: %{customdata[2]:.2f}<extra></extra>"
+        ),
+        selector=dict(mode="markers"),
+    )
+    fig.add_annotation(
+        text=f"r = {correlation:.2f}" if pd.notna(correlation) else "r = N/A",
+        xref="paper",
+        yref="paper",
+        x=0.98,
+        y=0.98,
+        showarrow=False,
+        font=dict(size=16, color="#111827"),
+    )
+    fig.update_layout(xaxis_title="초과근무 시간 (평균, 시간)", yaxis_title="CSAT 평균")
+    return fig
+
+
+OUTLIER_AGENTS = ["AG02", "AG03"]
+
+
+def build_outlier_comparison_chart(consult_df, team_filter):
+    df = consult_df if team_filter is None else consult_df[consult_df["team"] == team_filter]
+
+    summary_all = agent_csat_summary(df)
+    summary_excl = summary_all[~summary_all["agent_id"].isin(OUTLIER_AGENTS)]
+
+    def panel(summary):
+        n = len(summary)
+        trendline = "ols" if n >= 2 else None
+        correlation = summary["overtime_hours_avg"].corr(summary["avg_csat"]) if n >= 2 else float("nan")
+
+        fig = px.scatter(
+            summary,
+            x="overtime_hours_avg",
+            y="avg_csat",
+            trendline=trendline,
+            custom_data=["agent_id", "overtime_hours_avg", "avg_csat"],
+        )
+        fig.update_traces(
+            hovertemplate=(
+                "상담원 ID: %{customdata[0]}<br>초과근무 시간: %{customdata[1]}시간<br>"
+                "CSAT 평균: %{customdata[2]:.2f}<extra></extra>"
+            ),
+            selector=dict(mode="markers"),
+        )
+
+        slope = float("nan")
+        if trendline:
+            trendline_results = px.get_trendline_results(fig)
+            if not trendline_results.empty:
+                slope = trendline_results["px_fit_results"].iloc[0].params[1]
+
+        return fig, correlation, slope, n
+
+    fig_all, corr_all, slope_all, n_all = panel(summary_all)
+    fig_excl, corr_excl, slope_excl, n_excl = panel(summary_excl)
+
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=[
+            f"AG02·AG03 포함 (n={n_all})",
+            f"AG02·AG03 제외 (n={n_excl})",
+        ],
+    )
+    for trace in fig_all.data:
+        fig.add_trace(trace, row=1, col=1)
+    for trace in fig_excl.data:
+        fig.add_trace(trace, row=1, col=2)
+
+    def annotation_text(correlation, slope):
+        r_text = f"{correlation:.2f}" if pd.notna(correlation) else "N/A"
+        slope_text = f"{slope:.3f}" if pd.notna(slope) else "N/A"
+        return f"r = {r_text}<br>기울기 = {slope_text}"
+
+    fig.add_annotation(
+        text=annotation_text(corr_all, slope_all),
+        xref="x domain",
+        yref="y domain",
+        x=0.98,
+        y=0.98,
+        showarrow=False,
+        align="right",
+        font=dict(size=14, color="#111827"),
+        row=1,
+        col=1,
+    )
+    fig.add_annotation(
+        text=annotation_text(corr_excl, slope_excl),
+        xref="x domain",
+        yref="y domain",
+        x=0.98,
+        y=0.98,
+        showarrow=False,
+        align="right",
+        font=dict(size=14, color="#111827"),
+        row=1,
+        col=2,
+    )
+
+    fig.update_xaxes(title_text="초과근무 시간 (평균, 시간)", row=1, col=1)
+    fig.update_xaxes(title_text="초과근무 시간 (평균, 시간)", row=1, col=2)
+    fig.update_yaxes(title_text="CSAT 평균", row=1, col=1)
+
+    fig.update_layout(
+        title=f"이상치(AG02·AG03) 포함/제외 비교 ({team_filter if team_filter else '전체'})",
+        showlegend=False,
+    )
+    return fig
+
+
 def main():
     st.set_page_config(page_title="고객은 왜 이탈하는가", layout="wide")
     st.title("고객은 왜 이탈하는가 — 이탈 원인 진단 대시보드")
@@ -321,6 +536,20 @@ def main():
 
     st.subheader("⑥ 가입기간·이용량으로 본 이탈")
     st.plotly_chart(build_tenure_usage_chart(cust, usage), use_container_width=True)
+
+    st.divider()
+    st.subheader("상담원 관점: 직원만족도와 고객 경험")
+
+    agents_df = load_agents()
+    consult_df = load_consult_joined()
+
+    teams = sorted(agents_df["team"].unique())
+    selected_team = st.selectbox("팀 선택", ["전체"] + teams)
+    team_filter = None if selected_team == "전체" else selected_team
+
+    st.plotly_chart(build_enps_gauge(agents_df, team_filter), use_container_width=True)
+    st.plotly_chart(build_burnout_csat_chart(consult_df, team_filter), use_container_width=True)
+    st.plotly_chart(build_outlier_comparison_chart(consult_df, team_filter), use_container_width=True)
 
 
 if __name__ == "__main__":
