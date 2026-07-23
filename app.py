@@ -4,12 +4,10 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from google.cloud import bigquery
 from plotly.subplots import make_subplots
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
-BQ_DATASET = "7_8_practice"
 
 GRAY = "#9CA3AF"
 RED = "#DC2626"
@@ -288,33 +286,17 @@ def build_tenure_usage_chart(cust, usage):
     return fig
 
 
-@st.cache_resource
-def get_bq_client():
-    return bigquery.Client()
-
-
-@st.cache_data
 def load_agents():
-    client = get_bq_client()
-    return client.query(f"SELECT * FROM `{BQ_DATASET}.agents`").to_dataframe()
+    return load_csv("data_agents.csv")
 
 
-@st.cache_data
 def load_consult_joined():
-    client = get_bq_client()
-    query = f"""
-        SELECT
-            a.agent_id,
-            a.team,
-            a.overtime_hours_avg,
-            a.training_completed_yn,
-            s.csat,
-            c.is_recontact
-        FROM `{BQ_DATASET}.agents` AS a
-        JOIN `{BQ_DATASET}.data_consultations` AS c ON a.agent_id = c.agent_id
-        JOIN `{BQ_DATASET}.data_satisfaction` AS s ON c.consult_id = s.consult_id
-    """
-    return client.query(query).to_dataframe()
+    agents = load_agents()
+    con = load_csv("data_consultations.csv")
+    sat = load_csv("data_satisfaction.csv")
+
+    merged = agents.merge(con, on="agent_id", how="inner").merge(sat, on="consult_id", how="inner")
+    return merged[["agent_id", "team", "overtime_hours_avg", "csat"]]
 
 
 def classify_nps(score):
@@ -540,22 +522,16 @@ def main():
     st.divider()
     st.subheader("상담원 관점: 직원만족도와 고객 경험")
 
-    try:
-        agents_df = load_agents()
-        consult_df = load_consult_joined()
-    except Exception:
-        st.info(
-            "이 섹션은 BigQuery 연동이 필요합니다. 배포 환경에는 인증 정보가 설정되어 있지 않아 "
-            "표시되지 않으며, gcloud 인증이 되어 있는 로컬 환경에서만 확인할 수 있습니다."
-        )
-    else:
-        teams = sorted(agents_df["team"].unique())
-        selected_team = st.selectbox("팀 선택", ["전체"] + teams)
-        team_filter = None if selected_team == "전체" else selected_team
+    agents_df = load_agents()
+    consult_df = load_consult_joined()
 
-        st.plotly_chart(build_enps_gauge(agents_df, team_filter), use_container_width=True)
-        st.plotly_chart(build_burnout_csat_chart(consult_df, team_filter), use_container_width=True)
-        st.plotly_chart(build_outlier_comparison_chart(consult_df, team_filter), use_container_width=True)
+    teams = sorted(agents_df["team"].unique())
+    selected_team = st.selectbox("팀 선택", ["전체"] + teams)
+    team_filter = None if selected_team == "전체" else selected_team
+
+    st.plotly_chart(build_enps_gauge(agents_df, team_filter), use_container_width=True)
+    st.plotly_chart(build_burnout_csat_chart(consult_df, team_filter), use_container_width=True)
+    st.plotly_chart(build_outlier_comparison_chart(consult_df, team_filter), use_container_width=True)
 
 
 if __name__ == "__main__":
